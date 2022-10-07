@@ -1,15 +1,25 @@
 ﻿using System.Collections.Concurrent;
-using System.Net.Http.Headers;
-using System.Text.Json.Nodes;
-using Azure.Core;
 using Azure.Identity;
 using Microsoft.Graph;
 
-Console.WriteLine("Starting to count the AAD objects...");
-Console.WriteLine();
+const string tenantId = "";
+const string clientId = "";
+var scopes = new[] { "AuditLog.Read.All", "Directory.Read.All" };
 
-TokenCredential authProvider = null; // TODO
-GraphServiceClient graphClient = new GraphServiceClient(authProvider);
+var options = new TokenCredentialOptions
+{
+    AuthorityHost = AzureAuthorityHosts.AzurePublicCloud
+};
+
+Func<DeviceCodeInfo, CancellationToken, Task> callback = (code, cancellation) => {
+    Console.WriteLine(code.Message);
+    return Task.FromResult(0);
+};
+
+var deviceCodeCredential = new DeviceCodeCredential(
+    callback, tenantId, clientId, options);
+
+GraphServiceClient graphClient = new GraphServiceClient(deviceCodeCredential, scopes);
 
 var deletedUsers = await GetDeletedUsersCount_viaHttpCLient();
 var deletedGroups = await GetDeletedGroupsCount_viaHttpCLient();
@@ -198,38 +208,30 @@ async Task<List<User>> GetUsers()
 
 async Task<int> GetDeletedUsersCount_viaHttpCLient()
 {
-    var responseString = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.user");
+    var response = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.user");
 
-    var jsonObject = JsonNode.Parse(responseString)!;
-
-    return jsonObject["@odata.count"]!.GetValue<int>();
+    return response.Count();
 }
 
 async Task<int> GetDeletedGroupsCount_viaHttpCLient()
 {
-    var responseString = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.group");
+    var response = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.group");
 
-    var jsonObject = JsonNode.Parse(responseString)!;
-
-    return jsonObject["@odata.count"]!.GetValue<int>();
+    return response.Count();
 }
 
 async Task<int> GetDeletedApplicationsCount_viaHttpCLient()
 {
-    var responseString = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.application");
+    var response = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.application");
 
-    var jsonObject = JsonNode.Parse(responseString)!;
-
-    return jsonObject["@odata.count"]!.GetValue<int>();
+    return response.Count();
 }
 
 async Task<int> GetDeletedDevicesCount_viaHttpCLient()
 {
-    var responseString = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.device");
+    var response = await ExecuteMsGraphHttpCallForDeletedObjects("microsoft.graph.device");
 
-    var jsonObject = JsonNode.Parse(responseString)!;
-
-    return jsonObject["@odata.count"]!.GetValue<int>();
+    return response.Count();
 }
 
 
@@ -375,16 +377,26 @@ async Task<List<AdministrativeUnit>> GetAdministrativeUnits()
     return all;
 }
 
-async Task<string> ExecuteMsGraphHttpCallForDeletedObjects(string directoryObjectType)
-{
-    var accessToken = await authProvider.GetTokenAsync(new TokenRequestContext(new[] { "https://graph.microsoft.com/.default" }, null, null), CancellationToken.None);
+    async Task<List<DirectoryObject>> ExecuteMsGraphHttpCallForDeletedObjects(string directoryObjectType)
+    {
+        var all = new List<DirectoryObject>();
 
-    using HttpClient client = new HttpClient();
-    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken.Token);
-    client.DefaultRequestHeaders.Add("ConsistencyLevel", "eventual");
+        var groupItemsUrl = graphClient.Directory.DeletedItems.AppendSegmentToRequestUrl(directoryObjectType);
+        var currentSet = await (new DirectoryDeletedItemsCollectionRequestBuilder(groupItemsUrl, graphClient)).Request().GetAsync();
 
-    string requestUrl = $"https://graph.microsoft.com/v1.0/directory/deletedItems/{directoryObjectType}?$count=true&$select=id,DisplayName";
-    using var request = new HttpRequestMessage(new HttpMethod("GET"), requestUrl);
-    using var response = await client.SendAsync(request);
-    return await response.Content.ReadAsStringAsync();
-}
+        while (currentSet.Count > 0)
+        {
+            all.AddRange(currentSet.CurrentPage);
+
+            if (currentSet.NextPageRequest != null)
+            {
+                currentSet = await currentSet.NextPageRequest.GetAsync();
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return all;
+    }
